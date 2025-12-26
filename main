@@ -1,0 +1,174 @@
+import os
+import re
+import logging
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+
+# Configuration
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_API = os.getenv("GITHUB_API", "https://api.github.com")
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-3.5-turbo")
+OPENROUTER_VERIFY_SSL = os.getenv("OPENROUTER_VERIFY_SSL", "true").lower() == "true"
+
+BOT_MARKER = "<!-- AI-PR-REVIEW -->"
+MAX_DIFF_CHARS = 12000
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+PR_URL_RE = re.compile(
+    r"https://github.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<pr>\d+)"
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+
+# Security
+
+if not GITHUB_TOKEN:
+    raise RuntimeError("GITHUB_TOKEN missing")
+
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY missing")
+
+
+# Helper
+
+def parse_pr_url(url: str):
+    m = PR_URL_RE.match(url)
+    if not m:
+        raise ValueError(f"Invalid GitHub PR URL: {url}")
+
+    return m.group("owner"), m.group("repo"), int(m.group("pr"))
+
+def gh_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+
+# Github Client
+
+class GitHubClient:
+    def get_pr(self, owner, repo, pr):
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr}"
+        r = requests.get(url, headers=gh_headers(), verify=False)
+        r.raise_for_status()
+        return r.json()
+
+    def get_diff(self, owner, repo, pr):
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr}"
+        headers = gh_headers()
+        headers["Accept"] = "application/vnd.github.v3.diff"
+
+        r = requests.get(url, headers=headers, verify=False)
+        r.raise_for_status()
+        return r.text[:MAX_DIFF_CHARS]
+
+    def post_comment(self, owner, repo, pr, text):
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr}/comments"
+        payload = {"body": text}
+        r = requests.post(url, headers=gh_headers(), json=payload, verify=False)
+        r.raise_for_status()
+        return r.json()
+
+gh = GitHubClient()
+
+
+# Prompt Engineering
+
+def build_prompt(pr, diff):
+    return f"""
+You are a senior production engineer acting as a strict PR reviewer.
+
+### 🔒 VERDICT
+APPROVE | REQUEST_CHANGES | BLOCK
+
+### 📊 CONFIDENCE
+0–100
+
+### ⚠️ HIGH-RISK ISSUES
+
+### 🧱 DESIGN & MAINTAINABILITY CONCERNS
+
+### 🧪 TESTING GAPS
+
+### 🛠 CONCRETE FIXES
+
+### ⚠️ DIFF LIMITATIONS
+
+PR TITLE: {pr['title']}
+AUTHOR: {pr['user']['login']}
+
+CODE DIFF:
+{diff}
+"""
+
+
+# Openrouter/LLM Integration
+
+def call_openrouter(prompt: str):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://internal.ai-review",
+        "X-Title": "GitHub AI PR Reviewer",
+    }
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 1500,
+    }
+
+    r = requests.post(
+        OPENROUTER_URL,
+        headers=headers,
+        json=payload,
+        timeout=60,
+        verify=OPENROUTER_VERIFY_SSL,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+# Orchestration
+
+
+def run_review(pr_url: str):
+    owner, repo, pr = parse_pr_url(pr_url)
+
+    pr_meta = gh.get_pr(owner, repo, pr)
+    diff = gh.get_diff(owner, repo, pr)
+
+    prompt = build_prompt(pr_meta, diff)
+    review = call_openrouter(prompt)
+
+    final_comment = f"{BOT_MARKER}\n{review}"
+    gh.post_comment(owner, repo, pr, final_comment)
+
+    logging.info("AI review posted to GitHub PR.")
+
+
+# Entrypoint
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pr", required=True, help="GitHub PR URL")
+    args = parser.parse_args()
+
+    run_review(args.pr)
