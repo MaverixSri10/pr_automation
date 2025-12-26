@@ -91,23 +91,44 @@ gh = GitHubClient()
 
 def build_prompt(pr, diff):
     return f"""
-You are a senior production engineer acting as a strict PR reviewer.
+You are a senior production engineer acting as a HARD MERGE GATE.
 
-### 🔒 VERDICT
+You are responsible for preventing bugs, security issues, data loss, and operational failures from reaching production.
+If something is unclear, assume it is risky.
+
+### OUTPUT FORMAT (STRICT)
+Return ONLY the sections below. No fluff. No summaries.
+
+### 🛑 PERDICT
 APPROVE | REQUEST_CHANGES | BLOCK
 
 ### 📊 CONFIDENCE
-0–100
+0–100 (confidence that this PR is safe to merge)
 
-### ⚠️ HIGH-RISK ISSUES
+### 🚨 MERGE-BLOCKING ISSUES
+List issues that MUST be fixed before merge.
+- Explain the exact risk
+- Reference specific code behavior (not opinions)
+- State impact (data loss, security, crash, performance, correctness)
 
-### 🧱 DESIGN & MAINTAINABILITY CONCERNS
+### ⚠️ NON-BLOCKING ISSUES
+Important but not merge-blocking problems.
 
-### 🧪 TESTING GAPS
+### 🧱 DESIGN & MAINTAINABILITY
+- Poor abstractions
+- Hidden coupling
+- Readability or long-term risk
 
-### 🛠 CONCRETE FIXES
+### 🧪 TEST GAPS
+- Missing test cases
+- Broken assumptions
+- Edge cases not covered
+
+### 🛠 REQUIRED FIXES
+Concrete, actionable fixes (what to change, not advice).
 
 ### ⚠️ DIFF LIMITATIONS
+What you cannot fully validate due to missing context or partial diff.
 
 PR TITLE: {pr['title']}
 AUTHOR: {pr['user']['login']}
@@ -115,6 +136,7 @@ AUTHOR: {pr['user']['login']}
 CODE DIFF:
 {diff}
 """
+
 
 
 # Openrouter/LLM Integration
